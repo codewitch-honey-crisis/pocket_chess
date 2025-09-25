@@ -310,7 +310,7 @@ public:
     using pixel_type = typename ControlSurfaceType::pixel_type;
     using palette_type = typename ControlSurfaceType::palette_type;
 ```
-You can see it's a template class that derives from a `control<>` tempalte. `ControlSurfaceType` is the draw surface that the screen will pass in which is used for rendering the control, and is based on the screen's native pixel (and palette) format.
+You can see it's a template class that derives from a `control<>` template. `ControlSurfaceType` is the draw surface that the screen will pass in which is used for rendering the control, and is based on the screen's native pixel (and palette) format.
 
 Then there's some boilerplate copy and move overloads, as well as a couple of constructors:
 ```cpp
