@@ -372,7 +372,7 @@ void on_release() override {
 
 What we're doing here is taking the current touched square so we can highlight it, and then going through and drawing the squares and pieces that can be promoted. Note we use `draw::icon()` with the alpha transparency maps created earlier.
 
-In `on_touch()` we just just set the `m_last_touch` field to the location of the first touch point we receive.
+In `on_touch()` we just set the `m_last_touch` field to the location of the first touch point we receive.
 
 That's because in a UI typically we want the "meat" of an input to be handled on release. You may have several touch events for each release event, so it makes more sense to do an action once the button or whatever it is is depressed rather than pressed. To that end we handle the bulk of the input work in `on_release()` where we tell the chess engine that we promoted a pawn, and assuming it was successful, which it should be, we set that `just_promoted` workaround mentioned earlier so the appropriate board square can be redrawn afterward.
 
