@@ -22,15 +22,17 @@ private:
     uix::uix_justify m_text_justify;
     gfx::matrix m_matrix;
     float m_font_size;
-    gfx::sizef m_background_round;
+    gfx::sizef m_radiuses;
+    float m_border_width;
+    gfx::rgba_pixel<32> m_border_color;
     void build_label_path_untransformed() {
         if(m_font_stream==nullptr) {
             return;
         }
         m_label_text.ttf_font = m_font_stream;
         if(m_font_size<=0.f) {
-            const float target_width = this->dimensions().width;
-            float fsize = this->dimensions().height*.8f;
+            const float target_width = this->dimensions().width-m_border_width*2;
+            float fsize = this->dimensions().height-(m_border_width*2) *.8f;
             m_label_text_path.initialize();
             do {
                 m_label_text_path.clear();
@@ -46,8 +48,8 @@ private:
             m_label_text.font_size = m_font_size;
             m_label_text_path.text({0.f,0.f},m_label_text);
             m_label_text_bounds = m_label_text_path.bounds(true);
-            
         }
+        m_label_text_bounds.offset_inplace(m_border_width,m_border_width);
         m_matrix = gfx::matrix::create_identity();
         float w,h;
         switch(m_text_justify) {
@@ -103,13 +105,16 @@ private:
 public:
     vlabel() : base_type() ,m_label_text_dirty(true) {
         m_font_stream = nullptr;
+        m_border_width = 0;
+        
         m_label_text.text_sz("Label");
         m_label_text.encoding = &gfx::text_encoding::utf8;
         m_label_text.ttf_font_face = 0;
         m_color = gfx::vector_pixel(255,255,255,255);
         m_background_color = gfx::rgba_pixel<32>(0,true);
+        m_border_color = gfx::rgba_pixel<32>(0,true);
         m_font_size = 0.f;
-        m_background_round = {0.f,0.f};
+        m_radiuses = {0.f,0.f};
     }
     virtual ~vlabel() {
 
@@ -170,14 +175,30 @@ public:
         m_background_color = value;
         this->invalidate();
     }
-    gfx::sizef background_round() const {
-        return m_background_round;
+    gfx::sizef radiuses() const {
+        return m_radiuses;
     }
-    void background_round(gfx::sizef value) {
-        m_background_round=value;
+    void radiuses(gfx::sizef value) {
+        m_radiuses=value;
         this->invalidate();
     }
-    
+    gfx::rgba_pixel<32> border_color() const {
+        return m_border_color;
+    }
+    void border_color(gfx::rgba_pixel<32> value) {
+        m_border_color = value;
+        this->invalidate();
+    }
+    float border_width() const {
+        return m_border_width;
+    }
+    void border_width(float value) {
+        if(m_border_width!=value) {
+            m_border_width = value;
+            m_label_text_dirty = true;
+            this->invalidate();
+        }
+    }
 protected:
     virtual void on_before_paint() override {
         if(m_label_text_dirty) {
@@ -187,8 +208,14 @@ protected:
     }
     virtual void on_paint(control_surface_type& destination, const gfx::srect16& clip) {
         if(m_background_color.opacity()!=0) {
-            if(m_background_round.width==0.f && m_background_round.height==0.f ) {
-                gfx::draw::filled_rectangle(destination,destination.bounds(),m_background_color);
+            if(m_radiuses.width==0.f && m_radiuses.height==0.f) {
+                gfx::rect16 r = destination.bounds();
+                if(m_border_width && m_border_color.opacity()>0) {
+                    gfx::draw::filled_rectangle(destination,r,m_border_color);
+                    r.inflate_inplace(-m_border_width,-m_border_width);
+                }
+                gfx::draw::filled_rectangle(destination,r,m_background_color);
+                
             }
         }
         base_type::on_paint(destination,clip);
@@ -204,12 +231,15 @@ protected:
         si.fill_paint_type = gfx::paint_type::solid;
         si.stroke_paint_type = gfx::paint_type::none;
         if(m_background_color.opacity()!=0) {
-            if(m_background_round.width!=0.f || m_background_round.height!=0.f ) {
-                gfx::vector_pixel bg;
-                convert(m_background_color,&bg);
-                si.fill_color = bg;
+            if(m_radiuses.width!=0.f || m_radiuses.height!=0.f) {
+                if(m_border_width>0) {
+                    convert(m_border_color,&si.stroke_color);
+                    si.stroke_paint_type = gfx::paint_type::solid;
+                    si.stroke_width = m_border_width;
+                }
+                convert(m_background_color,&si.fill_color);
                 destination.style(si);
-                destination.rounded_rectangle((gfx::rectf)destination.bounds(),m_background_round);
+                destination.rounded_rectangle((gfx::rectf)destination.bounds(),m_radiuses);
                 destination.render();
             }
         }

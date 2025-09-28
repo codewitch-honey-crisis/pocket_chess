@@ -849,6 +849,7 @@ extern "C" void app_main() {
     score_white.text_justify(uix_justify::center);
     score_white.background_color(uix_color_t::green);
     score_white.color(uix_color_t::white);
+    score_white.radiuses(sizef(chess_piece_size->width/10,chess_piece_size->width/10));
     sprintf(score_white_text,"%d",(int)chess_score(&g,CHESS_WHITE));
     score_white.text(score_white_text);
     main_screen.register_control(score_white);
@@ -865,6 +866,7 @@ extern "C" void app_main() {
     score_black.bounds(contained);
     score_black.background_color(uix_color_t::dark_olive_green);
     score_black.color(uix_color_t::black);
+    score_black.radiuses(sizef(chess_piece_size->width/10,chess_piece_size->width/10));
     sprintf(score_black_text,"%d",(int)chess_score(&g,CHESS_BLACK));
     score_black.text(score_black_text);
     main_screen.register_control(score_black);
