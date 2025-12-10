@@ -22,7 +22,6 @@
 #include "chess.h"
 #include "gfx.hpp"
 #include "uix.hpp"
-#include "vlabel.hpp"
 #include "vicon.hpp"
 #define POWER_IMPLEMENTATION
 #include "assets/power.hpp"
@@ -202,7 +201,6 @@ static void lcd_initialize() {
         // 2nd buffer is for DMA performance, such that we can write one buffer while the other is transferring
         lcd.buffer2((uint8_t*)buf2);
         lcd.on_flush_callback(uix_flush,panel_handle);
-        
 }
 // UIX calls this
 static void uix_touch(point16* out_locations,
