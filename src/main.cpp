@@ -56,7 +56,6 @@ static void i2c_initialize()
     i2c_config_t i2c_config;
     memset(&i2c_config,0,sizeof(i2c_config));
     i2c_config.master.clk_speed = LCD_TOUCH_SPEED;
-    i2c_config.mode = LCD_TOUCH_I2C_HOST;
     i2c_config.sda_io_num = LCD_TOUCH_PIN_NUM_SDA;
     i2c_config.scl_io_num = LCD_TOUCH_PIN_NUM_SCL;
     ESP_ERROR_CHECK(i2c_driver_install((i2c_port_t)LCD_TOUCH_I2C_HOST,I2C_MODE_MASTER,0,0,0));
