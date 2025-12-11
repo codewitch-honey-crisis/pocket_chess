@@ -71,29 +71,29 @@
     dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7; \
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &dev_cfg,&i2c)); \
     uint8_t write_buf = 0x01; \
-    ESP_ERROR_CHECK(i2c_master_transmit(i2c,&write_buf,1,1000 / portTICK_PERIOD_MS)); \
+    ESP_ERROR_CHECK(i2c_master_transmit(i2c,&write_buf,1,1000 )); \
     ESP_ERROR_CHECK(i2c_master_bus_rm_device(i2c)); \
     dev_cfg.device_address = 0x38; \
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &dev_cfg,&i2c)); \
     write_buf = 0x2C; \
-    ESP_ERROR_CHECK(i2c_master_transmit(i2c,&write_buf,1,1000 / portTICK_PERIOD_MS)); \
+    ESP_ERROR_CHECK(i2c_master_transmit(i2c,&write_buf,1,1000 )); \
     esp_rom_delay_us(100 * 1000); \
     gpio_set_level((gpio_num_t)4, 0); \
     esp_rom_delay_us(100 * 1000); \
     write_buf = 0x2E; \
-    ESP_ERROR_CHECK(i2c_master_transmit(i2c,&write_buf,1,1000 / portTICK_PERIOD_MS)); \
+    ESP_ERROR_CHECK(i2c_master_transmit(i2c,&write_buf,1,1000 )); \
     esp_rom_delay_us(200 * 1000); \
     ESP_ERROR_CHECK(i2c_master_bus_rm_device(i2c))
 #else
 #define LCD_TOUCH_RESET \
-    uint8_t out = 0x01;\
-    ESP_ERROR_CHECK(i2c_master_write_to_device((i2c_port_t)0,0x24,&out,1,pdTICKS_TO_MS(1000)));\
-    out = 0x2c;\
-    ESP_ERROR_CHECK(i2c_master_write_to_device((i2c_port_t)0,0x38,&out,1,pdTICKS_TO_MS(1000)));\
+    uint8_t write_buf = 0x01;\
+    ESP_ERROR_CHECK(i2c_master_write_to_device((i2c_port_t)0,0x24,&write_buf,1,portMAX_DELAY));\
+    write_buf = 0x2c;\
+    ESP_ERROR_CHECK(i2c_master_write_to_device((i2c_port_t)0,0x38,&write_buf,1,portMAX_DELAY));\
     esp_rom_delay_us(100 * 1000);\
     gpio_set_level((gpio_num_t)4, 0);\
-    out = 0x2E;\
-    ESP_ERROR_CHECK(i2c_master_write_to_device((i2c_port_t)0,0x38,&out,1,pdTICKS_TO_MS(1000)));\
+    write_buf = 0x2E;\
+    ESP_ERROR_CHECK(i2c_master_write_to_device((i2c_port_t)0,0x38,&write_buf,1,portMAX_DELAY));\
     esp_rom_delay_us(200 * 1000)
 #endif
 #endif

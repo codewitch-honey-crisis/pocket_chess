@@ -228,10 +228,15 @@ static void uix_touch(point16* out_locations,
 }
 
 static void touch_initialize() {
+#ifdef LCD_TOUCH_RESET
+    LCD_TOUCH_RESET;
+#endif
     esp_lcd_panel_io_i2c_config_t tio_cfg;
     esp_lcd_panel_io_handle_t tio_handle;
     esp_lcd_touch_config_t tp_cfg;
+#ifndef LEGACY_I2C
     i2c_master_bus_handle_t i2c_handle;
+#endif
     esp_lcd_touch_handle_t touch_handle;
     memset(&tio_cfg,0,sizeof(tio_cfg));
     tio_cfg.dev_addr = ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS;
@@ -272,9 +277,7 @@ static void touch_initialize() {
     tp_cfg.flags.swap_xy = 0;
     tp_cfg.flags.mirror_x = 0;
     tp_cfg.flags.mirror_y = 0;
-#ifdef LCD_TOUCH_RESET
-    LCD_TOUCH_RESET;
-#endif
+
     // this fails sometimes, will reboot, and then works?
     ESP_ERROR_CHECK(LCD_TOUCH_PANEL(tio_handle,&tp_cfg,&touch_handle));
     lcd.on_touch_callback(uix_touch,touch_handle);
