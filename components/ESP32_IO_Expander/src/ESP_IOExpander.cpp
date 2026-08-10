@@ -26,7 +26,7 @@ ESP_IOExpander::ESP_IOExpander(i2c_port_t id, uint8_t address, const i2c_config_
 ESP_IOExpander::ESP_IOExpander(i2c_port_t id, uint8_t address, int scl, int sda):
     handle(NULL),
     i2c_id(id),
-    i2c_config((i2c_config_t)EXPANDER_I2C_CONFIG_DEFAULT(scl, sda)),
+    i2c_config((i2c_config_t)EXPANDER_I2C_CONFIG_DEFAULT((gpio_num_t)scl, (gpio_num_t)sda)),
     i2c_address(address),
     i2c_need_init(true)
 {

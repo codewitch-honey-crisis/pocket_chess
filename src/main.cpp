@@ -9,6 +9,12 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
 #include "esp_lcd_panel_vendor.h"
+#include "esp_mac.h"
+#include "esp_netif.h"
+#include "esp_wifi.h"
+#include "lwip/inet.h"
+#include "nvs_flash.h"
+#include "esp_now.h"
 #include "driver/gpio.h"
 #ifndef LEGACY_I2C
 #include "driver/i2c_master.h"
@@ -19,12 +25,16 @@
 #include "esp_spiffs.h"
 #include "esp_vfs_fat.h"
 #include "lcd_config.h"
+#include "esp_cache.h"
+#include "esp_memory_utils.h"
 #include "chess.h"
 #include "gfx.hpp"
 #include "uix.hpp"
 #include "vicon.hpp"
 #define POWER_IMPLEMENTATION
 #include "assets/power.hpp"
+#define CONNECT_IMPLEMENTATION
+#include "assets/connect.hpp"
 #define PIECE_IMPLEMENTATION
 #include "assets/piece.hpp"
 #define OPENSANS_REGULAR_IMPLEMENTATION
@@ -38,6 +48,24 @@ static const_buffer_stream font_stream(OpenSans_Regular,sizeof(OpenSans_Regular)
 
 // manages the screens
 static uix::display lcd;
+
+#define FB_COUNT 2
+// Push dirty cache lines for rows [y1..y2] out to PSRAM so the LCD DMA sees
+// them. C2M (writeback) only - nothing but the CPU ever writes the FB, so no
+// invalidate is ever needed. No-op on targets whose PSRAM cache is write-through.
+static inline void uix_fb_writeback(const void* fb, int y1, int y2) {
+#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
+    if (esp_ptr_external_ram(fb)) {
+        const size_t stride = (size_t)LCD_WIDTH * 2;   // RGB565
+        void*  start = (void*)(((uint8_t*)fb) + (size_t)y1 * stride);
+        size_t len   = (size_t)(y2 - y1 + 1) * stride;
+        ESP_ERROR_CHECK(esp_cache_msync(start, len,
+            ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED));
+    }
+#else
+    (void)fb; (void)y1; (void)y2;
+#endif
+}
 
 static void i2c_initialize()
 {
@@ -74,6 +102,19 @@ static void spiffs_initialize(void) {
 // UIX calls this to send bitmaps to the display
 static void uix_flush(const gfx::rect16& bounds, const void *bitmap, void *state)
 {
+#if FB_COUNT == 1
+    // Single framebuffer: it IS the scanout buffer. Once the writeback lands,
+    // the pixels are on screen. Nothing to recycle, nothing to wait for, so
+    // completion is synchronous.
+    uix_fb_writeback(bmp, bounds.y1, bounds.y2);
+    lcd.flush_complete();
+#else
+    // Multiple framebuffers: we rendered into a hidden buffer. Writeback first
+    // (DMA must not read stale lines), then retarget scanout at it. The swap
+    // lands at the next VSYNC, so completion is NOT signalled here - the
+    // on_vsync handler calls app.transfer_complete() once the swap is live.
+    uix_fb_writeback(bitmap, bounds.y1, bounds.y2);
+#endif
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)state;
     
     // pass the draw buffer to the driver
@@ -109,47 +150,47 @@ static void lcd_initialize() {
         //panel_config.dma_burst_size = 64;
         panel_config.num_fbs = 1,
         panel_config.clk_src = LCD_CLK_SRC_DEFAULT,
-        panel_config.disp_gpio_num = -1,
-        panel_config.pclk_gpio_num = LCD_PIN_NUM_CLK,
-        panel_config.vsync_gpio_num = LCD_PIN_NUM_VSYNC,
-        panel_config.hsync_gpio_num = LCD_PIN_NUM_HSYNC,
-        panel_config.de_gpio_num = LCD_PIN_NUM_DE,
+        panel_config.disp_gpio_num = (gpio_num_t)-1,
+        panel_config.pclk_gpio_num = (gpio_num_t)LCD_PIN_NUM_CLK,
+        panel_config.vsync_gpio_num = (gpio_num_t)LCD_PIN_NUM_VSYNC,
+        panel_config.hsync_gpio_num = (gpio_num_t)LCD_PIN_NUM_HSYNC,
+        panel_config.de_gpio_num = (gpio_num_t)LCD_PIN_NUM_DE,
 #if !defined(LCD_SWAP_COLOR_BYTES) || LCD_SWAP_COLOR_BYTES == false
-        panel_config.data_gpio_nums[0]=LCD_PIN_NUM_D00;
-        panel_config.data_gpio_nums[1]=LCD_PIN_NUM_D01;
-        panel_config.data_gpio_nums[2]=LCD_PIN_NUM_D02;
-        panel_config.data_gpio_nums[3]=LCD_PIN_NUM_D03;
-        panel_config.data_gpio_nums[4]=LCD_PIN_NUM_D04;
-        panel_config.data_gpio_nums[5]=LCD_PIN_NUM_D05;
-        panel_config.data_gpio_nums[6]=LCD_PIN_NUM_D06;
-        panel_config.data_gpio_nums[7]=LCD_PIN_NUM_D07;
+        panel_config.data_gpio_nums[0]=(gpio_num_t)LCD_PIN_NUM_D00;
+        panel_config.data_gpio_nums[1]=(gpio_num_t)LCD_PIN_NUM_D01;
+        panel_config.data_gpio_nums[2]=(gpio_num_t)LCD_PIN_NUM_D02;
+        panel_config.data_gpio_nums[3]=(gpio_num_t)LCD_PIN_NUM_D03;
+        panel_config.data_gpio_nums[4]=(gpio_num_t)LCD_PIN_NUM_D04;
+        panel_config.data_gpio_nums[5]=(gpio_num_t)LCD_PIN_NUM_D05;
+        panel_config.data_gpio_nums[6]=(gpio_num_t)LCD_PIN_NUM_D06;
+        panel_config.data_gpio_nums[7]=(gpio_num_t)LCD_PIN_NUM_D07;
 
-        panel_config.data_gpio_nums[8]=LCD_PIN_NUM_D08;
-        panel_config.data_gpio_nums[9]=LCD_PIN_NUM_D09;
-        panel_config.data_gpio_nums[10]=LCD_PIN_NUM_D10;
-        panel_config.data_gpio_nums[11]=LCD_PIN_NUM_D11;
-        panel_config.data_gpio_nums[12]=LCD_PIN_NUM_D12;
-        panel_config.data_gpio_nums[13]=LCD_PIN_NUM_D13;
-        panel_config.data_gpio_nums[14]=LCD_PIN_NUM_D14;
-        panel_config.data_gpio_nums[15]=LCD_PIN_NUM_D15;
+        panel_config.data_gpio_nums[8]=(gpio_num_t)LCD_PIN_NUM_D08;
+        panel_config.data_gpio_nums[9]=(gpio_num_t)LCD_PIN_NUM_D09;
+        panel_config.data_gpio_nums[10]=(gpio_num_t)LCD_PIN_NUM_D10;
+        panel_config.data_gpio_nums[11]=(gpio_num_t)LCD_PIN_NUM_D11;
+        panel_config.data_gpio_nums[12]=(gpio_num_t)LCD_PIN_NUM_D12;
+        panel_config.data_gpio_nums[13]=(gpio_num_t)LCD_PIN_NUM_D13;
+        panel_config.data_gpio_nums[14]=(gpio_num_t)LCD_PIN_NUM_D14;
+        panel_config.data_gpio_nums[15]=(gpio_num_t)LCD_PIN_NUM_D15;
 #else
-        panel_config.data_gpio_nums[0]=LCD_PIN_NUM_D08;
-        panel_config.data_gpio_nums[1]=LCD_PIN_NUM_D09;
-        panel_config.data_gpio_nums[2]=LCD_PIN_NUM_D10;
-        panel_config.data_gpio_nums[3]=LCD_PIN_NUM_D11;
-        panel_config.data_gpio_nums[4]=LCD_PIN_NUM_D12;
-        panel_config.data_gpio_nums[5]=LCD_PIN_NUM_D13;
-        panel_config.data_gpio_nums[6]=LCD_PIN_NUM_D14;
-        panel_config.data_gpio_nums[7]=LCD_PIN_NUM_D15;
+        panel_config.data_gpio_nums[0]=(gpio_num_t)LCD_PIN_NUM_D08;
+        panel_config.data_gpio_nums[1]=(gpio_num_t)LCD_PIN_NUM_D09;
+        panel_config.data_gpio_nums[2]=(gpio_num_t)LCD_PIN_NUM_D10;
+        panel_config.data_gpio_nums[3]=(gpio_num_t)LCD_PIN_NUM_D11;
+        panel_config.data_gpio_nums[4]=(gpio_num_t)LCD_PIN_NUM_D12;
+        panel_config.data_gpio_nums[5]=(gpio_num_t)LCD_PIN_NUM_D13;
+        panel_config.data_gpio_nums[6]=(gpio_num_t)LCD_PIN_NUM_D14;
+        panel_config.data_gpio_nums[7]=(gpio_num_t)LCD_PIN_NUM_D15;
 
-        panel_config.data_gpio_nums[8]=LCD_PIN_NUM_D00;
-        panel_config.data_gpio_nums[9]=LCD_PIN_NUM_D01;
-        panel_config.data_gpio_nums[10]=LCD_PIN_NUM_D02;
-        panel_config.data_gpio_nums[11]=LCD_PIN_NUM_D03;
-        panel_config.data_gpio_nums[12]=LCD_PIN_NUM_D04;
-        panel_config.data_gpio_nums[13]=LCD_PIN_NUM_D05;
-        panel_config.data_gpio_nums[14]=LCD_PIN_NUM_D06;
-        panel_config.data_gpio_nums[15]=LCD_PIN_NUM_D07;
+        panel_config.data_gpio_nums[8]=(gpio_num_t)LCD_PIN_NUM_D00;
+        panel_config.data_gpio_nums[9]=(gpio_num_t)LCD_PIN_NUM_D01;
+        panel_config.data_gpio_nums[10]=(gpio_num_t)LCD_PIN_NUM_D02;
+        panel_config.data_gpio_nums[11]=(gpio_num_t)LCD_PIN_NUM_D03;
+        panel_config.data_gpio_nums[12]=(gpio_num_t)LCD_PIN_NUM_D04;
+        panel_config.data_gpio_nums[13]=(gpio_num_t)LCD_PIN_NUM_D05;
+        panel_config.data_gpio_nums[14]=(gpio_num_t)LCD_PIN_NUM_D06;
+        panel_config.data_gpio_nums[15]=(gpio_num_t)LCD_PIN_NUM_D07;
 #endif
         memset(&panel_config.timings,0,sizeof(esp_lcd_rgb_timing_t));
         
@@ -188,16 +229,12 @@ static void lcd_initialize() {
         #if LCD_PIN_NUM_BCKL >= 0
         gpio_set_level((gpio_num_t)LCD_PIN_NUM_BCKL, LCD_BCKL_ON_LEVEL);
         #endif
-        void *buf1 = NULL, *buf2=NULL;
-        // it's recommended to allocate the draw buffer from internal memory, for better performance
-        size_t draw_buffer_sz = LCD_HRES * (LCD_VRES/LCD_DIVISOR) * sizeof(uint16_t);
-        buf1 = heap_caps_malloc(draw_buffer_sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        assert(buf1);
-        buf2 = heap_caps_malloc(draw_buffer_sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        assert(buf2);
-        lcd.buffer_size(draw_buffer_sz);
-        lcd.buffer1((uint8_t*)buf1);
-        // 2nd buffer is for DMA performance, such that we can write one buffer while the other is transferring
+        
+        lcd.buffer_size((LCD_VRES*LCD_HRES*LCD_BIT_DEPTH+7)/8);
+        lcd.update_mode(screen_update_mode::direct);
+        void* buf,*buf2;
+        ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle,2,&buf,&buf2));
+        lcd.buffer1((uint8_t*)buf);
         lcd.buffer2((uint8_t*)buf2);
         lcd.on_flush_callback(uix_flush,panel_handle);
 }
@@ -318,13 +355,13 @@ static bool create_piece_data(uint16_t piece_size) {
     chess_piece_bmp_dim  = {piece_size,piece_size};
     for(size_t i = 0;i<6;++i) {
         // create a new bitmap in 4-bit grayscale
-        auto bmp = create_bitmap<gsc_pixel<4>>({piece_size,piece_size});
+        auto bmp = create_bitmap<gsc_pixel<8>>({piece_size,piece_size});
         if(bmp.begin()==nullptr) {
             // out of memory
             goto error;
         }
         // fill with white
-        bmp.fill(bmp.bounds(),gsc_pixel<4>(15));
+        bmp.fill(bmp.bounds(),gsc_pixel<8>(255));
         // assign the bitmap array entry to the bitmap's buffer
         chess_piece_bmp_data[i]=bmp.begin();
         canvas cvs(bmp.dimensions());
@@ -350,7 +387,7 @@ static bool create_piece_data(uint16_t piece_size) {
         }
         cvs.deinitialize();
         // invert, because it's black on white, but we need an alpha transparency map
-        const size_t size = bitmap<gsc_pixel<4>>::sizeof_buffer(bmp.dimensions());
+        const size_t size = bitmap<gsc_pixel<8>>::sizeof_buffer(bmp.dimensions());
         for(size_t j = 0;j<size;++j) {
             uint8_t d = chess_piece_bmp_data[i][j];
             chess_piece_bmp_data[i][j]=255-d;
@@ -485,7 +522,7 @@ public:
             }
             draw::filled_rectangle(destination,square,uix_color_t::dark_green);
             draw::rectangle(destination,square.inflate(-2,-2),uix_color_t::dark_olive_green);
-            const auto ico = const_bitmap<alpha_pixel<4>>(chess_piece_bmp_dim,chess_piece_bmp_data[(size_t)type]);
+            const auto ico = const_bitmap<alpha_pixel<8>>(chess_piece_bmp_dim,chess_piece_bmp_data[(size_t)type]);
             const srect16 icon = ((srect16)ico.bounds()).center(square_size.bounds()).offset(x, 0);
             draw::icon(destination,icon.top_left(),ico,uix_color_t::khaki);
             ++type;
@@ -628,7 +665,10 @@ class chess_board : public control<ControlSurfaceType> {
                     const auto bd = (i & 1) ? uix_color_t::gold : uix_color_t::black;
                     auto px_bg = bg;
                     auto px_bd = bd;
-                    if (id > -1 && CHESS_TYPE(id) == CHESS_KING && chess_status(&m_game,CHESS_TEAM(id)) == CHESS_CHECK) {
+                    chess_status_t wstat,bstat;
+                    chess_status(&m_game,&wstat,&bstat);
+                    chess_status_t stat = (CHESS_TEAM(id)==CHESS_BLACK)?bstat:wstat;
+                    if (id > -1 && CHESS_TYPE(id) == CHESS_KING && stat == CHESS_CHECK) {
                         px_bd = uix_color_t::red;
                     }
                     bool is_move = false;
@@ -648,7 +688,7 @@ class chess_board : public control<ControlSurfaceType> {
                         
                     }
                     if (CHESS_NONE != id) {
-                        auto ico = const_bitmap<alpha_pixel<4>>(chess_piece_bmp_dim,chess_piece_bmp_data[CHESS_TYPE(id)]);
+                        auto ico = const_bitmap<alpha_pixel<8>>(chess_piece_bmp_dim,chess_piece_bmp_data[CHESS_TYPE(id)]);
                         const srect16 bounds = ((srect16)ico.bounds()).center(square_size.bounds()).offset(x, y);
                         auto px_piece = CHESS_TEAM(id) ? uix_color_t::black : uix_color_t::white;
                         draw::icon(destination, bounds.location(), ico, px_piece);
@@ -761,6 +801,7 @@ using chess_board_t = chess_board<surface_t>;
 static screen_t main_screen;
 static chess_board_t board;
 static icon_t reset_button;
+static icon_t connect_button;
 
 static void reset_button_on_pressed_changed(bool pressed, void* state) {
     if(!pressed) {
@@ -774,6 +815,11 @@ static void reset_button_on_pressed_changed(bool pressed, void* state) {
         esp_restart();
     }
 }
+static void connect_button_on_pressed_changed(bool pressed, void* state) {
+    if(!pressed) {
+        puts("Connect black team");
+    }
+}
 
 extern "C" void app_main() {
     printf("ESP-IDF version: %d.%d.%d\n",ESP_IDF_VERSION_MAJOR,ESP_IDF_VERSION_MINOR,ESP_IDF_VERSION_PATCH);
@@ -781,6 +827,9 @@ extern "C" void app_main() {
     spiffs_initialize();
     lcd_initialize();
     touch_initialize();
+    ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_ERROR_CHECK(esp_netif_init());
+        
     main_screen.dimensions({LCD_WIDTH,LCD_HEIGHT});
     const float screen_aspect = main_screen.dimensions().aspect_ratio();
     int16_t piece_size = 0;
@@ -828,6 +877,13 @@ extern "C" void app_main() {
     reset_button.on_pressed_changed_callback(reset_button_on_pressed_changed);
     main_screen.register_control(reset_button);
     
+    connect_button.bounds(reset_button.bounds().offset(main_screen.dimensions().width-reset_button.dimensions().width,0));
+    connect_button.background_color(uix_color_t::sky_blue);
+    connect_button.svg(connect_wifi);
+    connect_button.svg_dimensions(connect_wifi_dimensions);
+    connect_button.on_pressed_changed_callback(connect_button_on_pressed_changed);
+    main_screen.register_control(connect_button);
+
     const srect16 promo_rect(0,0,piece_size*4-1,piece_size-1);
     promotion_top.bounds(promo_rect.center(contained));
     promotion_top.visible(false);
