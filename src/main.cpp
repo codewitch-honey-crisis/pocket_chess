@@ -4,29 +4,27 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_timer.h"
-#include "esp_idf_version.h"
-#include "esp_lcd_panel_io.h"
-#include "esp_lcd_panel_ops.h"
-#include "esp_lcd_panel_rgb.h"
-#include "esp_lcd_panel_vendor.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "lwip/inet.h"
 #include "nvs_flash.h"
 #include "esp_now.h"
-#include "driver/gpio.h"
-#ifndef LEGACY_I2C
-#include "driver/i2c_master.h"
-#else
-#include "driver/i2c.h"
-#endif
-#include "esp_lcd_touch.h"
 #include "esp_spiffs.h"
 #include "esp_vfs_fat.h"
-#include "lcd_config.h"
+#include "panel.h"
+#if LCD_BUS == PANEL_BUS_MIPI || LCD_BUS == PANEL_BUS_RGB
 #include "esp_cache.h"
 #include "esp_memory_utils.h"
+
+#define USE_DIRECT_MODE
+#endif
+// How many framebuffers the driver allocated. 1 == the FB is live/scanned out.
+#if !defined(LCD_FRAMEBUFFER_COUNT)
+#define FB_COUNT 1
+#else
+#define FB_COUNT LCD_FRAMEBUFFER_COUNT
+#endif
 #include "chess.h"
 #include "gfx.hpp"
 #include "uix.hpp"
@@ -49,7 +47,7 @@ static const_buffer_stream font_stream(OpenSans_Regular,sizeof(OpenSans_Regular)
 // manages the screens
 static uix::display lcd;
 
-#define FB_COUNT 2
+#if LCD_BUS == PANEL_BUS_MIPI || LCD_BUS == PANEL_BUS_RGB
 // Push dirty cache lines for rows [y1..y2] out to PSRAM so the LCD DMA sees
 // them. C2M (writeback) only - nothing but the CPU ever writes the FB, so no
 // invalidate is ever needed. No-op on targets whose PSRAM cache is write-through.
@@ -66,30 +64,7 @@ static inline void uix_fb_writeback(const void* fb, int y1, int y2) {
     (void)fb; (void)y1; (void)y2;
 #endif
 }
-
-static void i2c_initialize()
-{
-#ifndef LEGACY_I2C
-    i2c_master_bus_config_t i2c_mst_config;
-    memset(&i2c_mst_config,0,sizeof(i2c_mst_config));
-    i2c_mst_config.clk_source = I2C_CLK_SRC_DEFAULT;
-    i2c_mst_config.i2c_port = (i2c_port_num_t)LCD_TOUCH_I2C_HOST;
-    i2c_mst_config.sda_io_num = (gpio_num_t)LCD_TOUCH_PIN_NUM_SDA;
-    i2c_mst_config.scl_io_num = (gpio_num_t)LCD_TOUCH_PIN_NUM_SCL;
-    i2c_mst_config.glitch_ignore_cnt = 7;
-    i2c_mst_config.flags.enable_internal_pullup = 1;
-    i2c_master_bus_handle_t bus;
-    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_config, &bus));
-#else
-    i2c_config_t i2c_config;
-    memset(&i2c_config,0,sizeof(i2c_config));
-    i2c_config.master.clk_speed = LCD_TOUCH_SPEED;
-    i2c_config.sda_io_num = LCD_TOUCH_PIN_NUM_SDA;
-    i2c_config.scl_io_num = LCD_TOUCH_PIN_NUM_SCL;
-    ESP_ERROR_CHECK(i2c_driver_install((i2c_port_t)LCD_TOUCH_I2C_HOST,I2C_MODE_MASTER,0,0,0));
-    ESP_ERROR_CHECK(i2c_param_config((i2c_port_t)LCD_TOUCH_I2C_HOST,&i2c_config));    
 #endif
-}
 static void spiffs_initialize(void) {
     esp_vfs_spiffs_conf_t conf;
     memset(&conf, 0, sizeof(conf));
@@ -100,8 +75,9 @@ static void spiffs_initialize(void) {
     ESP_ERROR_CHECK(esp_vfs_spiffs_register(&conf));
 }
 // UIX calls this to send bitmaps to the display
-static void uix_flush(const gfx::rect16& bounds, const void *bitmap, void *state)
-{
+static void uix_flush(const gfx::rect16& bounds, const void* bmp, void* state) {
+#if LCD_BUS == PANEL_BUS_MIPI || LCD_BUS == PANEL_BUS_RGB
+
 #if FB_COUNT == 1
     // Single framebuffer: it IS the scanout buffer. Once the writeback lands,
     // the pixels are on screen. Nothing to recycle, nothing to wait for, so
@@ -113,211 +89,49 @@ static void uix_flush(const gfx::rect16& bounds, const void *bitmap, void *state
     // (DMA must not read stale lines), then retarget scanout at it. The swap
     // lands at the next VSYNC, so completion is NOT signalled here - the
     // on_vsync handler calls app.transfer_complete() once the swap is live.
-    uix_fb_writeback(bitmap, bounds.y1, bounds.y2);
+    uix_fb_writeback(bmp, bounds.y1, bounds.y2);
+    panel_lcd_flush(0, 0, LCD_WIDTH - 1, LCD_HEIGHT - 1, (void*)bmp);
 #endif
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)state;
-    
-    // pass the draw buffer to the driver
-    esp_lcd_panel_draw_bitmap(panel_handle, bounds.x1, bounds.y1, bounds.x2 + 1, bounds.y2 + 1, bitmap);
+
+#else   // transfer-buffer buses (SPI / I80 / QSPI)
+
+#if LCD_TRANSFER_SIZE > 0
+    panel_lcd_flush(bounds.x1, bounds.y1, bounds.x2, bounds.y2, (void*)bmp);
+#if LCD_SYNC_TRANSFER == 1
+    lcd.flush_complete();    // async case completes via panel_lcd_flush_complete()
+#endif
+#else
+#error "LCD_TRANSFER_SIZE == 0 requires an RGB or MIPI panel"
+#endif
+
+#endif
 }
 // LCD Panel API calls this
-bool lcd_flush_complete(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *edata, void *user_ctx) {
+void panel_lcd_flush_complete() {
     // let the display know the flush has finished
     lcd.flush_complete();
-    return true;
 }
-static volatile bool lcd_is_vsync = 0;
-// LCD Panel API calls this
-bool lcd_vsync(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *edata, void *user_ctx) {
-    lcd_is_vsync=1;
-    return true;
-}
-static void lcd_initialize() {
-    #if LCD_PIN_NUM_BCKL >= 0
-    gpio_config_t bk_gpio_config;
-    memset(&bk_gpio_config,0,sizeof(gpio_config_t));
-    bk_gpio_config.mode = GPIO_MODE_OUTPUT;
-    bk_gpio_config.pin_bit_mask = 1ULL << LCD_PIN_NUM_BCKL;
-    ESP_ERROR_CHECK(gpio_config((gpio_num_t)LCD_PIN_NUM_BCKL,&bk_gpio_config));
-    gpio_set_level((gpio_num_t)LCD_PIN_NUM_BCKL, LCD_BCKL_OFF_LEVEL);
-    #endif
-    
-    esp_lcd_panel_handle_t panel_handle = NULL;
-    esp_lcd_rgb_panel_config_t panel_config;
-    memset(&panel_config,0,sizeof(esp_lcd_rgb_panel_config_t));
-     
-        panel_config.data_width = 16; // RGB565 in parallel mode, thus 16bit in width
-        //panel_config.dma_burst_size = 64;
-        panel_config.num_fbs = 1,
-        panel_config.clk_src = LCD_CLK_SRC_DEFAULT,
-        panel_config.disp_gpio_num = (gpio_num_t)-1,
-        panel_config.pclk_gpio_num = (gpio_num_t)LCD_PIN_NUM_CLK,
-        panel_config.vsync_gpio_num = (gpio_num_t)LCD_PIN_NUM_VSYNC,
-        panel_config.hsync_gpio_num = (gpio_num_t)LCD_PIN_NUM_HSYNC,
-        panel_config.de_gpio_num = (gpio_num_t)LCD_PIN_NUM_DE,
-#if !defined(LCD_SWAP_COLOR_BYTES) || LCD_SWAP_COLOR_BYTES == false
-        panel_config.data_gpio_nums[0]=(gpio_num_t)LCD_PIN_NUM_D00;
-        panel_config.data_gpio_nums[1]=(gpio_num_t)LCD_PIN_NUM_D01;
-        panel_config.data_gpio_nums[2]=(gpio_num_t)LCD_PIN_NUM_D02;
-        panel_config.data_gpio_nums[3]=(gpio_num_t)LCD_PIN_NUM_D03;
-        panel_config.data_gpio_nums[4]=(gpio_num_t)LCD_PIN_NUM_D04;
-        panel_config.data_gpio_nums[5]=(gpio_num_t)LCD_PIN_NUM_D05;
-        panel_config.data_gpio_nums[6]=(gpio_num_t)LCD_PIN_NUM_D06;
-        panel_config.data_gpio_nums[7]=(gpio_num_t)LCD_PIN_NUM_D07;
 
-        panel_config.data_gpio_nums[8]=(gpio_num_t)LCD_PIN_NUM_D08;
-        panel_config.data_gpio_nums[9]=(gpio_num_t)LCD_PIN_NUM_D09;
-        panel_config.data_gpio_nums[10]=(gpio_num_t)LCD_PIN_NUM_D10;
-        panel_config.data_gpio_nums[11]=(gpio_num_t)LCD_PIN_NUM_D11;
-        panel_config.data_gpio_nums[12]=(gpio_num_t)LCD_PIN_NUM_D12;
-        panel_config.data_gpio_nums[13]=(gpio_num_t)LCD_PIN_NUM_D13;
-        panel_config.data_gpio_nums[14]=(gpio_num_t)LCD_PIN_NUM_D14;
-        panel_config.data_gpio_nums[15]=(gpio_num_t)LCD_PIN_NUM_D15;
-#else
-        panel_config.data_gpio_nums[0]=(gpio_num_t)LCD_PIN_NUM_D08;
-        panel_config.data_gpio_nums[1]=(gpio_num_t)LCD_PIN_NUM_D09;
-        panel_config.data_gpio_nums[2]=(gpio_num_t)LCD_PIN_NUM_D10;
-        panel_config.data_gpio_nums[3]=(gpio_num_t)LCD_PIN_NUM_D11;
-        panel_config.data_gpio_nums[4]=(gpio_num_t)LCD_PIN_NUM_D12;
-        panel_config.data_gpio_nums[5]=(gpio_num_t)LCD_PIN_NUM_D13;
-        panel_config.data_gpio_nums[6]=(gpio_num_t)LCD_PIN_NUM_D14;
-        panel_config.data_gpio_nums[7]=(gpio_num_t)LCD_PIN_NUM_D15;
-
-        panel_config.data_gpio_nums[8]=(gpio_num_t)LCD_PIN_NUM_D00;
-        panel_config.data_gpio_nums[9]=(gpio_num_t)LCD_PIN_NUM_D01;
-        panel_config.data_gpio_nums[10]=(gpio_num_t)LCD_PIN_NUM_D02;
-        panel_config.data_gpio_nums[11]=(gpio_num_t)LCD_PIN_NUM_D03;
-        panel_config.data_gpio_nums[12]=(gpio_num_t)LCD_PIN_NUM_D04;
-        panel_config.data_gpio_nums[13]=(gpio_num_t)LCD_PIN_NUM_D05;
-        panel_config.data_gpio_nums[14]=(gpio_num_t)LCD_PIN_NUM_D06;
-        panel_config.data_gpio_nums[15]=(gpio_num_t)LCD_PIN_NUM_D07;
-#endif
-        memset(&panel_config.timings,0,sizeof(esp_lcd_rgb_timing_t));
-        
-        panel_config.timings.pclk_hz = LCD_PIXEL_CLOCK_HZ;
-        panel_config.timings.h_res = LCD_HRES;
-        panel_config.timings.v_res = LCD_VRES;
-        panel_config.timings.hsync_back_porch = LCD_HSYNC_BACK_PORCH;
-        panel_config.timings.hsync_front_porch = LCD_HSYNC_FRONT_PORCH;
-        panel_config.timings.hsync_pulse_width = LCD_HSYNC_PULSE_WIDTH;
-        panel_config.timings.vsync_back_porch = LCD_VSYNC_BACK_PORCH;
-        panel_config.timings.vsync_front_porch = LCD_VSYNC_FRONT_PORCH;
-        panel_config.timings.vsync_pulse_width = LCD_VSYNC_PULSE_WIDTH;
-        panel_config.timings.flags.pclk_active_neg = true;
-        panel_config.timings.flags.hsync_idle_low = false;
-        panel_config.timings.flags.pclk_idle_high = LCD_CLK_IDLE_HIGH;
-        panel_config.timings.flags.de_idle_high = LCD_DE_IDLE_HIGH;
-        panel_config.timings.flags.vsync_idle_low = false;
-        panel_config.flags.bb_invalidate_cache = true;
-        panel_config.flags.disp_active_low = false;
-        panel_config.flags.double_fb = false;
-        panel_config.flags.no_fb = false;
-        panel_config.flags.refresh_on_demand = false;
-        panel_config.flags.fb_in_psram = true; // allocate frame buffer in PSRAM
-        //panel_config.sram_trans_align = 4;
-        //panel_config.psram_trans_align = 64;
-        panel_config.num_fbs = 2;
-        panel_config.bounce_buffer_size_px = LCD_HRES*(LCD_VRES/LCD_DIVISOR);
-        ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_config, &panel_handle));
-        esp_lcd_rgb_panel_event_callbacks_t cbs;
-        memset(&cbs,0,sizeof(cbs));
-        cbs.on_color_trans_done = lcd_flush_complete;
-        cbs.on_vsync = lcd_vsync;
-        esp_lcd_rgb_panel_register_event_callbacks(panel_handle,&cbs,NULL);
-        ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
-        ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
-        #if LCD_PIN_NUM_BCKL >= 0
-        gpio_set_level((gpio_num_t)LCD_PIN_NUM_BCKL, LCD_BCKL_ON_LEVEL);
-        #endif
-        
-        lcd.buffer_size((LCD_VRES*LCD_HRES*LCD_BIT_DEPTH+7)/8);
-        lcd.update_mode(screen_update_mode::direct);
-        void* buf,*buf2;
-        ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle,2,&buf,&buf2));
-        lcd.buffer1((uint8_t*)buf);
-        lcd.buffer2((uint8_t*)buf2);
-        lcd.on_flush_callback(uix_flush,panel_handle);
-}
 // UIX calls this
 static void uix_touch(point16* out_locations,
                                            size_t* in_out_locations_size,
                                            void* state)
 {
-    esp_lcd_touch_handle_t handle = (esp_lcd_touch_handle_t)state;
-    if(ESP_OK==esp_lcd_touch_read_data(handle)) {
-        uint16_t x[5],y[5],s[5];
-        uint8_t count;
-        if(esp_lcd_touch_get_coordinates(handle,x,y,s,&count,5)) {
-            if(count>*in_out_locations_size) {
-                count = *in_out_locations_size;
-            }
-            *in_out_locations_size = count;
-            for(size_t i = 0;i<(size_t)count;++i) {
-                // the panel may have a different res than the screen
-                x[i]=x[i]*LCD_HRES/LCD_TOUCH_HRES;
-                y[i]=y[i]*LCD_VRES/LCD_TOUCH_VRES;
-                out_locations[i]=point16(x[i],y[i]);
-            }
-            return;
-        }
+    panel_touch_update();
+    uint16_t x[5];
+    uint16_t y[5];
+    uint16_t s[5];
+    size_t count=5;
+    panel_touch_read(&count,x,y,s);
+    if(count>0) {
+        printf("touch at: (%d,%d)\n",*x,*y);
     }
-    *in_out_locations_size = 0;
-}
-
-static void touch_initialize() {
-#ifdef LCD_TOUCH_RESET
-    LCD_TOUCH_RESET;
-#endif
-    esp_lcd_panel_io_i2c_config_t tio_cfg;
-    esp_lcd_panel_io_handle_t tio_handle;
-    esp_lcd_touch_config_t tp_cfg;
-#ifndef LEGACY_I2C
-    i2c_master_bus_handle_t i2c_handle;
-#endif
-    esp_lcd_touch_handle_t touch_handle;
-    memset(&tio_cfg,0,sizeof(tio_cfg));
-    tio_cfg.dev_addr = ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS;
-    tio_cfg.control_phase_bytes = 1;
-    tio_cfg.dc_bit_offset = 0;
-    tio_cfg.lcd_cmd_bits = LCD_TOUCH_CMD_BITS;
-    tio_cfg.lcd_param_bits = LCD_TOUCH_PARAM_BITS;
-#ifdef LCD_TOUCH_DISABLE_CONTROL_PHASE
-    tio_cfg.flags.disable_control_phase = 1;
-#endif
-    tio_cfg.flags.dc_low_on_data = 0;
-    tio_cfg.on_color_trans_done = NULL;
-#ifndef LEGACY_I2C
-    tio_cfg.scl_speed_hz = LCD_TOUCH_SPEED;
-#endif
-    tio_cfg.user_ctx = NULL;
-#ifndef LEGACY_I2C
-    ESP_ERROR_CHECK(i2c_master_get_bus_handle(LCD_TOUCH_I2C_HOST,&i2c_handle)) ;
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(i2c_handle, &tio_cfg,&tio_handle));
-#else
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c_v1(LCD_TOUCH_I2C_HOST,&tio_cfg,&tio_handle));
-#endif
-    memset(&tp_cfg,0,sizeof(tp_cfg));
-    tp_cfg.x_max = LCD_TOUCH_HRES;
-    tp_cfg.y_max = LCD_TOUCH_VRES;
-#ifdef LCD_TOUCH_PIN_NUM_RST
-    tp_cfg.rst_gpio_num = (gpio_num_t)LCD_TOUCH_PIN_NUM_RST;
-#else
-    tp_cfg.rst_gpio_num = (gpio_num_t)-1;
-#endif
-#ifdef LCD_TOUCH_PIN_NUM_INT
-    tp_cfg.rst_gpio_num = (gpio_num_t)LCD_TOUCH_PIN_NUM_INT;
-#else
-    tp_cfg.int_gpio_num = (gpio_num_t)-1;
-#endif
-    tp_cfg.levels.reset = 0;
-    tp_cfg.levels.interrupt = 0;
-    tp_cfg.flags.swap_xy = 0;
-    tp_cfg.flags.mirror_x = 0;
-    tp_cfg.flags.mirror_y = 0;
-
-    // this fails sometimes, will reboot, and then works?
-    ESP_ERROR_CHECK(LCD_TOUCH_PANEL(tio_handle,&tp_cfg,&touch_handle));
-    lcd.on_touch_callback(uix_touch,touch_handle);
+    if(count<*in_out_locations_size) {
+        *in_out_locations_size = count;
+    }
+    for(size_t i = 0;i<*in_out_locations_size;++i) {
+        out_locations[i]=point16(x[i],y[i]);
+    }
 }
 
 static size16 chess_piece_bmp_dim;
@@ -823,13 +637,26 @@ static void connect_button_on_pressed_changed(bool pressed, void* state) {
 
 extern "C" void app_main() {
     printf("ESP-IDF version: %d.%d.%d\n",ESP_IDF_VERSION_MAJOR,ESP_IDF_VERSION_MINOR,ESP_IDF_VERSION_PATCH);
-    i2c_initialize();
     spiffs_initialize();
-    lcd_initialize();
-    touch_initialize();
+    panel_lcd_init();
+    panel_touch_init();
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
-        
+#ifndef USE_DIRECT_MODE
+    lcd.buffer_size(LCD_TRANSFER_SIZE);
+    lcd.buffer1((uint8_t*)panel_lcd_transfer_buffer());
+    lcd.buffer2((uint8_t*)panel_lcd_transfer_buffer2());
+#else
+    lcd.update_mode(uix::screen_update_mode::direct);
+    lcd.buffer_size((LCD_WIDTH*LCD_HEIGHT*LCD_BIT_DEPTH+7)/8);
+    lcd.buffer1((uint8_t*)panel_lcd_framebuffer(0));
+#if FB_COUNT > 1
+    lcd.buffer2((uint8_t*)panel_lcd_framebuffer(1));
+#endif
+#endif
+    
+    lcd.on_flush_callback(uix_flush);
+    lcd.on_touch_callback(uix_touch);
     main_screen.dimensions({LCD_WIDTH,LCD_HEIGHT});
     const float screen_aspect = main_screen.dimensions().aspect_ratio();
     int16_t piece_size = 0;
@@ -954,9 +781,8 @@ extern "C" void app_main() {
             just_promoted = -1;
             main_screen.invalidate(srect16(origin.offset(board.bounds().top_left()),square_size));
         }
-        if(lcd_is_vsync==1) {
-            lcd_is_vsync=0;
-            lcd.update();
-        }
+        
+        lcd.update();
+        
     }
 }
